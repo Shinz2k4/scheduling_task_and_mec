@@ -45,7 +45,7 @@ class OffloadingEnv(gym.Env):
         self.use_history_task_observation = False
         self.length_task_history = 5
         self.varience = {}
-        self.client = httpx.AsyncClient(http2=True)
+        self.client = httpx.AsyncClient(http2=False)
         
     def create_socket_listener(self):
         self.close_socket()

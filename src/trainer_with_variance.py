@@ -72,7 +72,7 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
     check_done  = 0
     if experiment_types[experiment_type] == 'esimated_processing_time':
         scaler = joblib.load(f"{save_dir}/scaler.pkl")
-    client = httpx.AsyncClient(http2=True)
+    client = httpx.AsyncClient(http2=False)
 
     while duration > 0:
         event = rng.exponential(system_inter_arrival_rate)
