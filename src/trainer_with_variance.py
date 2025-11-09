@@ -1,5 +1,4 @@
 import asyncio, argparse
-import random
 import httpx
 import numpy as np
 import re, sys, subprocess
@@ -7,15 +6,18 @@ from env import OffloadingEnv
 from ddqn_agent import DDQNAgent
 import matplotlib.pyplot as plt
 import matplotlib
-from predict_required_cpu import CPUPredictor
 matplotlib.use("Agg") 
 import time
-from utils.utils_func import get_active_service, get_feature, get_feature_delay
+from utils.utils_func import get_active_service, get_feature
 import os
 import torch
 from trainer_processing_time import DelayPredictor
+from sklearn.preprocessing import StandardScaler
 import joblib
-from fdo import fast_detect_outage
+from host_send_request import send_tasks
+
+import threading
+
 import pandas as pd
 N_SERVER = 4
 
@@ -26,8 +28,7 @@ experiment_types = {
     2: 'drl_prediction',
     3: 'esimated_processing_time',
     4: 'drl_train_with_history_task_observation',
-    5: 'drl_prediction_with_history_task_observation',
-    6: 'fast_detect_outage'
+    5: 'drl_prediction_with_history_task_observation'
 }
 
 async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration=1000, output_file = "results", N_SERVER = 4, experiment_type = 0, LGOBAL_SEED = 45):
@@ -54,12 +55,11 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
         drl_checkpoint = drl_checkpoint.split('.')[0]+ "_with_history.pth"
         env.set_use_history_task_observation(True)
     await env.ainit()
-    print('state init')
     obs = await env.get_observation()
     queue = {}
     rewards = []
     all_reward = {}
-    queues = [[] for _ in range(N_SERVER)]
+    all_varience_reward = []
     agent = DDQNAgent(len(obs)+1, N_SERVER, batch_size = 512)
     if experiment_types[experiment_type].find('drl_prediction')!=-1:
         agent.load(drl_checkpoint)
@@ -72,9 +72,9 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
     check_done  = 0
     if experiment_types[experiment_type] == 'esimated_processing_time':
         scaler = joblib.load(f"{save_dir}/scaler.pkl")
-    
+    client = httpx.AsyncClient(http2=True)
+
     while duration > 0:
-        
         event = rng.exponential(system_inter_arrival_rate)
         print(event)
         await asyncio.sleep(event)
@@ -82,19 +82,10 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
         model = rng.choice(list_service_in_docker[1])
         model_id = 0
         start_time = time.perf_counter()
-       
         if model =="ssd":
             model_id = 9
         elif model =="resnet34":
             model_id = 3
-        feature_vector_delay = np.array(get_feature_delay(obs, id_picture, model_id, 1)) # so 1 o day la dai dien cho slected docker vi 4 docker nhu 1 ( cung cau hinh ) 
-        feature_vector_delay = feature_vector_delay.reshape(1, -1)
-
-        Predictor_cpu_required = CPUPredictor(feature_vector_delay)
-        required_cpu = Predictor_cpu_required.predict_required_cpu()
-
-        task_deadline = round(random.uniform(1, 2), 2)
-
         if experiment_types[experiment_type] == 'random':
             slected_docker = rng.integers(docker_min_max[0], docker_min_max[1])
             predict_cost = time.perf_counter() - start_time
@@ -116,33 +107,28 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
                     if min_processing_predicted_time > processing_predicted_time:
                         slected_docker = i+1
                         min_processing_predicted_time = processing_predicted_time
-                    
                 return slected_docker
             predict_cost = time.perf_counter() - start_time
     
             slected_docker = select_server(obs)
-        elif experiment_types[experiment_type] == 'fast_detect_outage':
-            cur_queues = await env.get_queues()
-            delay_min = 999999999999999999
-            flag_min = 999999999999999999
-            flag_success = False
-            for i in range(N_SERVER):
-                flag, delay = fast_detect_outage(cur_queues[i], cnt, required_cpu, task_deadline)
-                if flag <= flag_min: 
-                    if delay < delay_min :
-                        delay_min = delay
-                        flag_min = i
-                        slected_docker = i + 1
-                        flag_success = True
-            
-            predict_cost = time.perf_counter() - start_time  
-            if not flag_success:
-                
-                raise ValueError("Task không thể lập lịch được theo FDO")      
+        t1 = time.perf_counter()
         df["id"].append(cnt)
         df["id_picture"].append(id_picture)
         df['predict_cost'].append(predict_cost)
         slected_port = port_base + slected_docker
+        # kwargs_ = {
+        #     'task_num': 1,
+        #     'url': f"http://localhost:{slected_port}/handle_host_request",
+        #     'request' : 'inference',
+        #     'docker': slected_docker,
+        #     'id': cnt,
+        #     'model': model,
+        #     'id_picture': id_picture,
+        #     'client': client
+        # }
+        # t = threading.Thread(target=send_tasks, kwargs=kwargs_)
+        # env.update_historical_tasks(slected_docker - 1, model_id)
+
         cmd = [
             sys.executable,
             "host_send_request.py",
@@ -154,28 +140,27 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
             "--state", f"{obs}", #save to train predict processing time
             "--model", str(model),
             "--id_picture", str(id_picture),
-            "--required_cpu", str(required_cpu),
-            "--deadline", str(task_deadline)
         ]
-        
-        
-        t1= time.perf_counter()
-
         env.update_historical_tasks(slected_docker - 1, model_id)
         subprocess.Popen(cmd)
+
         next_state = await env.get_observation()
         next_state_ = next_state.copy()
         next_state_.insert(0, model_id)
         obs.insert(0, model_id)
         queue[cnt] = [obs, slected_docker - 1, next_state_]
-        obs = next_state
         reward = await env.get_reward()
+        varience_reward = await env.get_reward_by_queing_varience(model_id, server_id = slected_docker -1)
+        varience_rewards = -varience_reward[slected_docker-1]
+        agent.remember(obs, slected_docker - 1, next_state_, varience_rewards, False)
         all_reward.update(reward)
+        all_varience_reward.append(varience_rewards)
+        obs = next_state
 
         #====================
         def process_rewards():
             nonlocal rewards, all_reward, queue, cnt, done
-            del_r_key = []    
+            del_r_key = []
             asyncio.run(env.get_observation())
             # print("env.is_all_queue_end() ---------------> ",env.is_all_queue_end())
             if done and env.is_all_queue_end():
@@ -186,18 +171,12 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
                 except Exception as e:
                     continue
                 try:
-                    if re_val != "None" and re_val is not None:
-                        train_data = queue[int(taskid)]
-                        train_data.append(-float(re_val))
-                        if re_val > 50 or (cnt > 0 and cnt%200 == 0 and experiment_types[experiment_type] == 'drl_train'):
-                            done = True
-                            agent.remember(train_data[0], train_data[1], train_data[2], train_data[3], True)
-                        else:
-                            agent.remember(train_data[0], train_data[1], train_data[2], train_data[3], False)
-                        rewards.append(-float(re_val))
-                        del queue[int(taskid)]
-                        del_r_key.append(taskid)  
-                        print(f"---------> {re_val}")
+                    if re_val > 50 or (cnt > 0 and cnt%100 == 0 and experiment_types[experiment_type] == 'drl_train'):
+                        env.varience = {}
+                        done = True
+                    rewards.append(-float(re_val))
+                    del queue[int(taskid)]
+                    del_r_key.append(taskid)  
                 except Exception as e:
                     print(f"Chua tim thay {taskid} {e}")
                     continue
@@ -215,7 +194,6 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
             if not done:
                 env.reset_historical_tasks()
             loop_after_done = True
-            
         done = False
         if cnt > 0 and cnt % 100 == 0:
             plt.plot(rewards)
@@ -224,6 +202,13 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
             plt.title('Reward')
             plt.savefig(f'./{output_file}/rewards_{experiment_types[experiment_type]}.png')
             plt.close()
+
+            plt.plot(all_varience_reward)
+            plt.xlabel('Episode')
+            plt.ylabel('Reward')
+            plt.title('Reward')
+            plt.savefig(f'./{output_file}/rewards_varience_{experiment_types[experiment_type]}.png')
+            plt.close()
             agent.save(drl_checkpoint)
 
             payload = {"name": f"{output_file}/results_n_server_{N_SERVER}_n_user_{n_users}_{experiment_types[experiment_type]}_seed_{LGOBAL_SEED}.csv"}
@@ -231,7 +216,6 @@ async def run(n_users=10, lamd=1.1, port_base=10000, docker_min_max=[], duration
             url = "http://127.0.0.1:15000/restart_saver_no_reset_df"
             try:
                 r = httpx.post(url, json=payload, timeout=30)
-                print(r.status_code, r.text)
             except Exception as e:
                 print(f"cannot save file {e} existing...")
                 exit(0)

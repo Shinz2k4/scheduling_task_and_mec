@@ -29,11 +29,11 @@ EOF
 done
 
 echo "closing docker containers ..."
-if [ "$(docker ps -q)" ]; then
-    docker stop $(docker ps -q)
+if [ "$(sudo docker ps -q)" ]; then
+    sudo docker stop $(sudo docker ps -q)
 fi
 
-if [ "$(docker ps -a -q)" ]; then
-    docker rm $(docker ps -a -q)
+if [ "$(sudo docker ps -a -q)" ]; then
+    sudo docker rm $(sudo docker ps -a -q)
 fi
 echo "All Docker containers stopped and removed."

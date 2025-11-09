@@ -8,8 +8,9 @@ from utils.utils_func import get_docker_metrics_by_name, thread_func
 from host_send_request import send_tasks
 from fastapi import FastAPI, Request
 from collections import deque
-
+import time
 import threading
+import socket, json
 
 class OffloadingEnv(gym.Env):
     """
@@ -22,6 +23,7 @@ class OffloadingEnv(gym.Env):
         self.num_servers = num_servers
         self.max_queue = max_queue
         self.update_interval = update_interval
+        self.socket_listeners = []
         
         # Action và observation space
         self.action_space = spaces.Discrete(num_servers)
@@ -32,6 +34,8 @@ class OffloadingEnv(gym.Env):
         # Server info
         self.server_host = ["0.0.0.0"]*num_servers
         self.server_port = [port_base + i for i in range(1, num_servers+1)]
+        #socket_listener
+        self.create_socket_listener()
         
         # State và cache Docker metrics
         self.state = None
@@ -40,6 +44,25 @@ class OffloadingEnv(gym.Env):
         self.all_queue_end = False
         self.use_history_task_observation = False
         self.length_task_history = 5
+        self.varience = {}
+        self.client = httpx.AsyncClient(http2=True)
+        
+    def create_socket_listener(self):
+        self.close_socket()
+        self.socket_listeners = []
+        for i in range(len(self.server_port)):
+            SOCKET_PATH = f"./../tmp/docker_sockets/container_{self.server_port[i]}.sock"
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.connect(SOCKET_PATH)
+            self.socket_listeners.append(client)
+    
+    def close_socket(self):
+        if len(self.socket_listeners) == 0:
+            return
+        for socket in self.socket_listeners:
+            socket.close()        
+        self.socket_listeners = []
+
     def set_use_history_task_observation(self, value: bool):
         self.use_history_task_observation = value
         self.historical_tasks = [deque([-1] * self.length_task_history, maxlen=self.length_task_history) for _ in range(self.num_servers)]
@@ -72,29 +95,34 @@ class OffloadingEnv(gym.Env):
             except Exception as e:
                 print(f"[Docker Metrics Error] {e}", flush=True)
             await asyncio.sleep(self.update_interval)
-
+    
+    async def fetch_queue(self, idx, port, request = "state"): 
+        # url = f"http://localhost:{port}/handle_host_request"
+        # async with httpx.AsyncClient(timeout=1, http2=True) as client:
+        #     r = await send_tasks(task_num=1, url=url, request="state", docker=idx+1, client=client)
+        #     data = r.json() 
+        #     queue_list = data.get("queue", [])
+        # self.create_socket_listener()
+        SOCKET_PATH = f"./../tmp/docker_sockets/container_{port}.sock"
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(SOCKET_PATH)
+        try:
+            message = json.dumps({"request": request}).encode()
+            await asyncio.to_thread(client.sendall, message)
+            response = await asyncio.to_thread(client.recv, 165536) 
+            data = json.loads(response.decode())
+            if request!= 'state':
+                return data
+            else:
+                return data.get("queue", [])
+        except (ConnectionError, json.JSONDecodeError) as e:
+            print(f"Error fetching from client {idx}: {e}")
+            return []
+        
     async def get_observation(self):
         """Lấy state hiện tại: Docker metrics + queue lengths"""        
-        async def fetch_queue(idx, host, port): 
-            url = f"http://localhost:{port}/handle_host_request" 
-            r = await send_tasks(task_num=1, url=url, request="state", docker=idx+1) 
-            data = r.json() 
-            queue_list = data.get("queue", [])
-            return queue_list 
-        queues = [fetch_queue(i, self.server_host[i], self.server_port[i]) for i in range(self.num_servers)] 
+        queues = [self.fetch_queue(i,self.server_port[i]) for i in range(self.num_servers)] 
         queues = await asyncio.gather(*queues)
-        print(f"Queues fetched : {queues}")
-
-        # for i in range(self.num_servers):
-        #     if fast_detect_outage(queues[i], new_task, current_clock=env.current_time):
-                
-        #         queues[i].append(new_task)
-        #         assigned_server = i
-        #         break
-        # else:
-        #     print(f"[!] Task {new_task.id} bị outage — không server nào lập lịch được.")
-
-        
         # print(self._docker_metrics_cache)
         server_information_ram_cpu = self._docker_metrics_cache.copy()
         if not server_information_ram_cpu:
@@ -108,42 +136,65 @@ class OffloadingEnv(gym.Env):
             end = start + inter
             self.state += server_information_ram_cpu[start:end]
             self.state.append(len(queues[i]))
-            print(f"queue length ----------- {int(i)}", len(queues[int(i)]))
-            if len(queues[i]) > 0:
+            print(f"queue length ----------- {int(i)}",len(queues[int(i)]))
+            if len(queues[i])>0:
                 self.all_queue_end = False
+            else:
+                self.varience = {}
             if self.use_history_task_observation:
                 self.state += list(self.historical_tasks[i])
-        
         return self.state
-    async def get_queues(self):
-        """Lấy trạng thái queue hiện tại của các server"""        
-        async def fetch_queue(idx, host, port): 
-            url = f"http://localhost:{port}/handle_host_request" 
-            r = await send_tasks(task_num=1, url=url, request="state", docker=idx+1) 
-            data = r.json() 
-            queue_list = data.get("queue", [])
-            return queue_list 
-        queues = [fetch_queue(i, self.server_host[i], self.server_port[i]) for i in range(self.num_servers)] 
-        queues = await asyncio.gather(*queues)
-        return queues
-    
     def is_all_queue_end(self):
         return self.all_queue_end
     async def get_reward(self):
-        async def fetch_queue(idx, host, port):
-            url = f"http://localhost:{port}/handle_host_request"
-            r = await send_tasks(task_num=1, url=url, request="result", docker=idx+1)
-            data = r.json()
-            return data
-        queues = [fetch_queue(i, self.server_host[i], self.server_port[i])
+        queues = [self.fetch_queue(i, self.server_port[i],request="result")
                 for i in range(self.num_servers)]
         queues = await asyncio.gather(*queues)
         merged = {}
-        # print(queues)
-        for q in queues:
-            merged.update(q['results'])
+        try:
+            for q in queues:
+                merged.update(q['results'])
+        except Exception as e:
+            print(f"an erroes {e}")
         return merged
-        
+    async def get_queues(self):
+        """Lấy trạng thái queue hiện tại của các server"""        
+        queues = [self.fetch_queue(i,self.server_port[i]) for i in range(self.num_servers)] 
+        queues = await asyncio.gather(*queues)
+        return queues
+    async def get_reward_by_queing_varience(self, taks_id, server_id):
+        queues = [self.fetch_queue(i, self.server_port[i], request="state") for i in range(self.num_servers)] 
+        queues = await asyncio.gather(*queues)
+        reward = {}
+        for idx, q in enumerate(queues):
+            if server_id == idx:
+                if idx in self.varience.keys():
+                    pre_data = self.varience[idx]
+                    n = pre_data['n']
+                    mean_old = pre_data['mean']
+                    M2 = pre_data['M2']
+
+                    n += 1
+                    mean = mean_old + (taks_id-mean_old)/n
+                    M2 =  (M2*(n-1) + (taks_id - mean_old)*(taks_id - mean))/n
+
+                    self.varience[idx] = {
+                        'M2': M2,
+                        'n': n,
+                        'mean': mean
+                    }
+                    reward[idx] = M2*0.5 + 0.5*len(queues[idx])
+                else:
+                    self.varience[idx] = {
+                        'M2': 0.0,
+                        'n': 1,
+                        'mean': taks_id
+                    }
+                    reward[idx] = 0.0*0.5 + 0.5*len(queues[idx])
+            else:
+                continue
+        return reward
+    
     def reset(self):
         self.state = np.concatenate([
             np.random.randint(0, self.max_queue//2, size=self.num_servers),

@@ -6,6 +6,47 @@ import torch.optim as optim
 import torch.nn.functional as F
 import yaml
 import os
+from sklearn.preprocessing import StandardScaler
+import joblib
+
+
+import numpy as np
+
+class RunningMeanStd:
+    def __init__(self, shape, epsilon=1e-4, device="cpu", dtype=torch.float32):
+        self.mean = torch.zeros(shape, dtype=dtype, device=device)
+        self.var = torch.ones(shape, dtype=dtype, device=device)
+        self.count = torch.tensor(epsilon, dtype=dtype, device=device)
+
+    @torch.no_grad()
+    def update(self, x: torch.Tensor):
+        """x: tensor có shape (batch_size, *shape)"""
+        if x.ndim == 1:
+            x = x.unsqueeze(0)  # đảm bảo có batch dimension
+
+        batch_mean = x.mean(dim=0)
+        batch_var = x.var(dim=0, unbiased=False)
+        batch_count = x.size(0)
+        self._update_from_moments(batch_mean, batch_var, batch_count)
+
+    def _update_from_moments(self, batch_mean, batch_var, batch_count):
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta.pow(2) * self.count * batch_count / tot_count
+        new_var = M2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+
+    def normalize(self, x: torch.Tensor):
+        """Trả về x đã được chuẩn hóa"""
+        return (x - self.mean) / torch.sqrt(self.var + 1e-8)
+
 class QNetwork(nn.Module):
     def __init__(self, state_size, action_size, hidden_size=64):
         super(QNetwork, self).__init__()
@@ -51,6 +92,7 @@ class DDQNAgent:
 
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.criterion = nn.MSELoss()
+        self.scaler = RunningMeanStd(shape=(state_size,))
 
  
     def remember(self, state, action, next_state,reward, done=False):
@@ -61,15 +103,20 @@ class DDQNAgent:
             action_idx = random.randrange(self.action_size)
         else:
             state_tensor = torch.FloatTensor(state).unsqueeze(0)
+            state_tensor = self.norm_state(state_tensor)
             q_values = self.q_net(state_tensor)
             action_idx = torch.argmax(q_values).item()
 
         return action_idx
-
+    
+    def norm_state(self, states):
+        mean = self.scaler.mean
+        var = self.scaler.var
+        states_norm = (states - mean) / np.sqrt(var + 1e-8)
+        return states_norm
     def update(self):
         if len(self.memory) < self.batch_size:
             return  
-        
         print("update ------ model")
         batch = random.sample(self.memory, self.batch_size)
 
@@ -79,8 +126,13 @@ class DDQNAgent:
         next_states = torch.FloatTensor([b[3] for b in batch])
         dones = torch.FloatTensor([b[4] for b in batch])
 
+        self.scaler.update(states)
+        states = self.norm_state(states)
         q_values = self.q_net(states).gather(1, actions)
 
+        self.scaler.update(next_states)
+        next_states = self.norm_state(next_states)
+        
         next_actions = torch.argmax(self.q_net(next_states), dim=1, keepdim=True)
         next_q_values = self.target_net(next_states).gather(1, next_actions).squeeze(1)
         target_q = rewards + (1 - dones) * self.gamma * next_q_values
@@ -100,15 +152,19 @@ class DDQNAgent:
     def save(self, filepath="ddqn_agent.pth"):
         os.makedirs(cfg.get('checkpoint',"")['model_path_dir'],exist_ok=True)
         pathckpt = os.path.join(cfg.get('checkpoint',"")['model_path_dir'], filepath)
+        pathckpt_runningstd = os.path.join(cfg.get('checkpoint',"")['model_path_dir'], filepath.split('.')[0]+"_RunningMeanStd.pkl")
         torch.save({
             "q_net": self.q_net.state_dict(),
             "target_net": self.target_net.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "epsilon": self.epsilon
         }, pathckpt)
+        joblib.dump(self.scaler, pathckpt_runningstd)
         print(f"Model saved to {filepath}")
     def load(self, filepath="ddqn_agent.pth"):
         pathckpt = os.path.join(cfg.get('checkpoint',"")['model_path_dir'], filepath)
+        pathckpt_runningstd = os.path.join(cfg.get('checkpoint',"")['model_path_dir'], filepath.split('.')[0]+"_RunningMeanStd.pkl")
+        self.scaler = joblib.load(pathckpt_runningstd)
         checkpoint = torch.load(pathckpt, map_location=torch.device("cpu"))
         self.q_net.load_state_dict(checkpoint["q_net"])
         self.target_net.load_state_dict(checkpoint["target_net"])

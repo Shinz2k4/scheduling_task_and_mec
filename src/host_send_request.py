@@ -46,15 +46,19 @@ async def send_tasks(task_num, url, request = "", docker = None, id = None, curr
             "deadline": float(deadline) if deadline is not None else 1.0
         }
         # print(f"Sending task with request {request} id_picture = {id_picture}, model={model}  --> {current_state_information}")
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(url, json=payload)  
-            # print(response.json())
+        if client is not None:
+            response = await client.post(url, json=payload)
+        else:
+            async with httpx.AsyncClient(timeout=1, http2=True) as client:
+                response = await client.post(url, json=payload)  
+                # print(response.json())
         task_num -= 1
         cnt += 1
+
     return response
 if __name__ == "__main__":
     import asyncio
-    ap = argparse.ArgumentParser() 
+    ap = argparse.ArgumentParser()
     ap.add_argument("--request", type=str, required=True)
     ap.add_argument("--num", type=int, required=True)
     ap.add_argument("--docker", type=str,default=None)

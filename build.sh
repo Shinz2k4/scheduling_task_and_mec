@@ -1,11 +1,12 @@
 #!/bin/bash
 
-docker build -f docker/Dockerfile -t mec_simulation:latest .
+sudo docker build -f docker/Dockerfile -t mec_simulation:latest .
 
 N_SERVERS=4
 BASE_PORT=10000
 OS_TYPE=$(uname)
 
+mkdir -p ./tmp/docker_sockets
 
 if [[ "$OS_TYPE" == "Linux" ]]; then
     TOTAL_CORES=$(nproc)
@@ -27,30 +28,31 @@ for i in $(seq 1 $N_SERVERS); do
     port=$((BASE_PORT + i))  
 
     echo "Starting container $container_name on port $port ..."
-
-
     if [[ "$OS_TYPE" == "Linux" ]]; then
         echo "Detected Linux "
         echo "Launching $container_name on cores ${docker_cores_list[$i]}"
-        docker run -dit \
-            -p $port:$port \
+        sudo docker run -dit \
+            --network=host \
             --cpuset-cpus="${docker_cores_list[$i]}" \
+            --cpus="$(echo ${docker_cores_list[$i]} | awk -F',' '{print NF}')" \
             --memory=5g \
             --memory-swap=5g \
             -v ./val2017:/shared \
             -v ./service:/service \
+            -v ./tmp/docker_sockets:/tmp/docker_sockets\
             --name "$container_name" \
             mec_simulation:latest
 
     elif [[ "$OS_TYPE" == "Darwin" ]]; then
-        docker run -dit \
+        sudo docker run -dit \
             -p $port:$port \
             -v ./val2017:/shared \
             -v ./service:/service \
+            -v ./tmp/docker_sockets:/./tmp/docker_sockets \
             --name "$container_name" \
             mec_simulation:latest
     else
-        echo "Unsupported OS: $OS_TYPE "
+        echo "Unsupported OS: $OS_TYPE."
     fi
             
 
@@ -61,15 +63,15 @@ for i in $(seq 1 $N_SERVERS); do
     container_name="mec_simulation_$i"
     port=$((BASE_PORT + i))
     echo "Starting uvicorn inside container $container_name on port $port ..."
-    if [[ "$OS" == "Darwin" ]]; then
+    if [[ "$OS_TYPE" == "Darwin" ]]; then
 osascript <<EOF
     tell application "Terminal"
-        do script "docker exec -it  $container_name bash -c 'cd src && uvicorn servers.handle_host_request:app --host 0.0.0.0 --port $port'"
+        do script "sudo docker exec -it  $container_name bash -c 'export CONTAINER_PORT=$port && cd src && uvicorn servers.handle_host_request:app --host 0.0.0.0 --port $port'"
         set custom title of front window to "mec_simulation_$i"
     end tell
 EOF
     elif  [[ "$OS_TYPE" == "Linux" ]]; then
-        gnome-terminal --title="mec_simulation_$i" -- bash -c "docker exec -it $container_name bash -c 'cd src && uvicorn servers.handle_host_request:app --host 0.0.0.0 --port $port'; exec bash"
+        gnome-terminal --title="mec_simulation_$i" -- bash -c "sudo docker exec -it $container_name bash -c 'export CONTAINER_PORT=$port && cd src && uvicorn servers.handle_host_request:app --host 0.0.0.0 --port $port'; exec bash"
     else
         echo "Unsupported OS: $OS_TYPE "
     fi

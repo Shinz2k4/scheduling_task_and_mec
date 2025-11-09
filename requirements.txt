@@ -14,3 +14,4 @@ pydantic
 scikit-learn
 matplotlib
 gymnasium
+orjson
