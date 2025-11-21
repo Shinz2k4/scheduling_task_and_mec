@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+httpx
+numpy == 1.26.*
+pillow
+pyyaml
+psutil
+torch==2.2.*
+torchvision==0.17.*
+python-multipart
+statistic
+pandas
+pydantic
+scikit-learn
+matplotlib
+gymnasium
+orjson
