@@ -140,12 +140,10 @@ async def handle_host_request(task: Task):
             with open(filename, "w") as f:
                 json.dump(list_active_service, f, indent=2)
         elif task.description == "inference":
-            
-            # fdo
             print(f"Queue size before adding task: {queue.qsize()}")
             await queue.put(task)
             sort_queue_deadline(queue)
-            print(f"Queue has been sorted.")
+            print(f"Queue has been sorted.")    
             print(f"Queue size after adding task: {queue.qsize()}")
             return {"status": "queued", "task_id": task.task_id,"current result": []}
        

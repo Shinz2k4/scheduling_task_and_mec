@@ -97,8 +97,8 @@ if __name__ == "__main__":
 
     list_docker, list_service_in_docker = get_active_service()
 
-    df = pd.read_csv(f"/home/ailab/Documents/dminh/mec_simulation_mutipleserver/output_file3/results_n_server_4_n_user_10_random_seed_45.csv")
-    # df = pd.read_csv(f"./../output_file_{len(list_service_in_docker[1])}_service_{args.n_users}_users/results_n_server_4_n_user_{args.n_users}_random_seed_{args.seed}.csv")
+    # df = pd.read_csv(f"/home/ailab/Documents/dminh/mec_simulation_mutipleserver/output_file3/results_n_server_4_n_user_10_random_seed_45.csv")
+    df = pd.read_csv(f"./../output_file_{len(list_service_in_docker[1])}_service_{args.n_users}_users/results_n_server_4_n_user_{args.n_users}_random_seed_{args.seed}.csv")
     print(f"len df {len(df)}")
     df["model_code"] = df["results"].apply(encode_model)
     df["server_index"] = df["results"].apply(extract_server_port)
